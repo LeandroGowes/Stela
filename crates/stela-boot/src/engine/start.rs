@@ -2166,7 +2166,7 @@ struct Platform {
     remappers: &'static remapping::Remappers,
     /// Affine runtime/source remain held through paused/quarantined frames.
     /// Its producer services require their own complete admission graph.
-    _work: Option<&'static kernel_work::KernelWork>,
+    _work: Result<&'static kernel_work::KernelWork, kernel_work::Error>,
 }
 
 /// # Safety
@@ -2432,11 +2432,11 @@ fn start_platform(
             output::arguments(format_args!(
                 "NATIVE WORK owned stacks=32 foreground=verified services=unpublished\n"
             ));
-            Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
+            Ok(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
         }
         Err(error) => {
             output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
-            None
+            Err(error)
         }
     };
     let host_acpi = aml::HostAcpi::start(
@@ -2450,7 +2450,7 @@ fn start_platform(
         native_mmio,
         handoff.tsc_hz,
         prepared_sci,
-        work,
+        work.as_ref().ok().copied(),
     );
     crate::native_idle::install(
         host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
@@ -2550,7 +2550,7 @@ fn start_devices(
     host_acpi: Option<&'static aml::HostAcpi>,
     native_mmio: &Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
-    kernel_work: Option<&'static kernel_work::KernelWork>,
+    kernel_work: Result<&'static kernel_work::KernelWork, kernel_work::Error>,
 ) -> HostDevices {
     let &Wanted {
         firmware: ref host_firmware,
@@ -2621,8 +2621,9 @@ fn start_devices(
             let medium_partition = options.install_source;
             let log_partition = handoff.log_partition.map(Guid);
             let usb4_approved = options.usb4_approved.clone();
-            let work = kernel_work
-                .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
+            let work = kernel_work.unwrap_or_else(|error| {
+                output::fatal(format_args!("native probe could not prepare kernel work: {error}"))
+            });
             let opened = work.call_owned(60_000_000, move || {
                 let native = mmio.map(|mmio| {
                     services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz, usb4_approved)
